@@ -10,7 +10,14 @@ library(RPostgreSQL)
 path.to.extract.from <- "C:/Users/kgreger/Downloads/"
 file.to.extract <- "S3A_OL_2_WFR____20170507T103435_20170507T103735_20170507T124202_0179_017_222_2340_MAR_O_NR_002.SEN3"
 path.to.extract.to <- "C:/Users/kgreger/Downloads/output"
+step.size <- 1000000  ## step size for pivot chunks
+pivot <- TRUE  ## should data be pivoted to long format?
+filter <- TRUE  ## should NAs be filtered? (pivoted data will always be filtered)
+variable.to.filter.null.values.by <- "CHL_NN"  ## if filtering, which variable should NAs be filtered from
+export.geotiff <- TRUE
 
+
+##--- build fork for zip vs folder
 
 ## extract zip file
 unzip(paste0(path.to.extract.from, 
@@ -27,9 +34,6 @@ con <- dbConnect(drv,
                  port = 5432,
                  user = "postgres", 
                  password = "postgres")
-
-
-## --- this is where the magic happens ---
 
 
 ## load geo_coordinates.nc
@@ -53,13 +57,13 @@ for(f in files) {
                        "/", 
                        f), 
                 suppress_dimvals = TRUE)
-  ## do stuff (extract, pivot, ...)
+  
   ## check for valid dimension
   if (nc$ndims > 1) {
     if (nc$dim[[1]]$len != nc.dims[1] | nc$dim[[2]]$len != nc.dims[2]) { next }
   }
   
-  cat(paste0("\n", f))
+  cat(paste("\nProcessing:", f))
   
   ## loop through ll variables in nc file
   for(v in 1:nc$nvars) {
@@ -75,14 +79,49 @@ for(f in files) {
   
 }
 
-## write data to PostgreSQL
-dbWriteTable(con,
-             "data",
-             value = df,
-             append = FALSE,
-             row.names = FALSE)
+
+## fork execution if pivot or not
+if (pivot) {
+  ## pivot df to long format
+  for (i in seq(0, nrow(df), step.size)) {
+    cat(paste0(i, "\n"))
+    df.temp <- melt(df[i:(step.size + i), ], id = c("id", "latitude", "longitude")) %>% 
+      filter(!is.na(.$value))
+    if (i == 0) {
+      ## write data to PostgreSQL
+      dbWriteTable(con,
+                   "data_long",
+                   value = df.temp,
+                   append = FALSE,
+                   row.names = FALSE)
+    } else {
+      ## write data to PostgreSQL
+      dbWriteTable(con,
+                   "data_long",
+                   value = df.temp,
+                   append = TRUE,
+                   row.names = FALSE)
+    }
+    rm(df.temp)
+  }
+} else {
+  if (filter.nas) {
+    ## filter for NULL values in defined variable
+    df <- df[!is.na(get(paste0("df$", variable.to.filter.null.values.by))), ]
+  }
+  
+  ## write data to PostgreSQL
+  dbWriteTable(con,
+               "data",
+               value = df,
+               append = FALSE,
+               row.names = FALSE)
+}
+
+
 
 ## clean up
+dbDisconnect(con)
 unlink(path.to.extract.to, 
        recursive = TRUE)
 rm(df)
